@@ -1,6 +1,6 @@
 ---
 name: launchpad
-description: Use when starting a new project, scaffolding a monorepo, or setting up Cloudflare infrastructure for a web + API application. Triggers on "new project", "scaffold", "create project", "init project", "start a new app".
+description: Use when starting a new project, scaffolding a multi-project repo, or setting up Cloudflare infrastructure for a web + API application. Triggers on "new project", "scaffold", "create project", "init project", "start a new app".
 ---
 
 # Launchpad
@@ -59,11 +59,15 @@ Ask if the project needs authentication. Suggest options:
 
 Ask if the project needs email integration. If yes, always use **Resend**.
 
-### 7. Resource creation
+### 7. Application domain (only if API worker selected)
+
+Ask for the domain the application will be hosted on. This is needed to configure Cloudflare worker routes so the API worker serves `/v1/*` on the same domain as the web app. If the user doesn't have a domain yet, suggest using a placeholder like `myapp.example.com` — they can update it later in wrangler.jsonc. Skip this question if no API worker was selected in step 3.
+
+### 8. Resource creation
 
 Ask if user wants Cloudflare resources created now via wrangler CLI, or later manually.
 
-### 8. Remote resources
+### 9. Remote resources
 
 Ask if user wants to test with remote resources during development. If yes, add `remote: true` to all resource bindings in wrangler.jsonc.
 
@@ -103,7 +107,7 @@ After CLI initialization, install dependencies via `npm install`. This pins to t
 **Web projects:**
 ```bash
 cd {project}
-npm install react react-dom @tanstack/react-router @tanstack/react-query axios date-fns clsx tailwind-merge class-variance-authority lucide-react
+npm install @tanstack/react-router @tanstack/react-query axios date-fns clsx tailwind-merge class-variance-authority lucide-react
 npm install -D tailwindcss @tailwindcss/vite typescript @vitejs/plugin-react eslint wrangler
 ```
 
@@ -130,6 +134,10 @@ After initialization, rename project directories to match the user's chosen name
 
 ## Phase 3 — Configure
 
+### Dev server ports
+
+Each sub-project must use a unique 5-digit random port (10000–65535) for its dev server to avoid conflicts with other projects. Generate a port for each project using `echo $((RANDOM % 55536 + 10000))` and hardcode it in the config files below. Do not ask the developer — just pick the ports.
+
 ### wrangler.jsonc
 
 For each worker, configure wrangler.jsonc:
@@ -142,10 +150,24 @@ For each worker, configure wrangler.jsonc:
   "compatibility_date": "{today}",
   "observability": { "enabled": true },
   "upload_source_maps": true,
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
+  "dev": { "port": {port} }
   // Add resource bindings below
 }
 ```
+
+**For API workers only**, add a `routes` array to the same wrangler.jsonc so the worker handles `/v1/*` on the application domain:
+
+```jsonc
+  "routes": [
+    {
+      "pattern": "{domain}/v1/*",
+      "zone_name": "{zone}"
+    }
+  ]
+```
+
+`{domain}` is the application domain from Phase 1. `{zone}` is the root domain — if domain is `app.example.com`, zone is `example.com`. If domain has no subdomain (e.g. `example.com`), zone and domain are the same value.
 
 **Resource naming — always use the project prefix:**
 
@@ -160,6 +182,32 @@ For each worker, configure wrangler.jsonc:
 | Pages | `{prefix}-web` |
 
 Never use generic names like "api", "database", "storage" that conflict with other projects.
+
+### vite.config.ts
+
+For web projects, configure vite with the dev server port. If the project has an API worker, include the `/v1` proxy so API calls work during local development:
+
+```typescript
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  server: {
+    port: {port},
+    // Include proxy only if project has an API worker
+    proxy: {
+      "/v1": {
+        target: "http://localhost:{api-port}",
+        changeOrigin: true,
+      },
+    },
+  },
+});
+```
+
+Where `{api-port}` is the API worker's dev server port from wrangler.jsonc.
 
 ### package.json scripts
 
@@ -203,6 +251,7 @@ For secrets: add them to `.dev.vars` first, then run `cf-typegen` so they appear
 If user opted in, create resources via wrangler CLI:
 
 ```bash
+wrangler pages project create {prefix}-web
 wrangler d1 create {prefix}-d1
 wrangler r2 bucket create {prefix}-r2
 wrangler kv namespace create {prefix}-kv
@@ -233,6 +282,36 @@ npm run db:migrate:local # apply locally
 ```
 
 If remote resources are enabled: `npm run db:migrate:remote`
+
+### API worker entry point
+
+Create `src/index.ts` for API workers with all routes under `/v1`:
+
+```typescript
+import { Hono } from "hono";
+
+const app = new Hono<{ Bindings: CloudflareBindings }>().basePath("/v1");
+
+app.get("/health", (c) => c.json({ status: "ok" }));
+
+export default app;
+```
+
+All API routes must be registered on this app instance — they will automatically be prefixed with `/v1`.
+
+### Axios API client
+
+Create `src/lib/api.ts` in web projects to configure axios for the API:
+
+```typescript
+import axios from "axios";
+
+export const api = axios.create({
+  baseURL: "/v1",
+});
+```
+
+All API calls in the web app must use this `api` instance instead of importing axios directly.
 
 ### Environment config
 
@@ -272,7 +351,7 @@ export const config = {
 
 ### .claude/settings.local.json
 
-Create with deny rules for every worker that has migrations:
+Create with deny rules for every worker that has migrations, and attribution config:
 
 ```json
 {
@@ -281,6 +360,10 @@ Create with deny rules for every worker that has migrations:
       "Edit({worker}/migrations/**)",
       "Write({worker}/migrations/**)"
     ]
+  },
+  "attribution": {
+    "commit": "",
+    "pr": ""
   }
 }
 ```
@@ -391,3 +474,4 @@ git commit -m "chore: initial project scaffold via launchpad"
 - **Install deps via `npm install`** — pins versions at install time, never use `latest` tag
 - **For email integration, always use Resend**
 - **Each project is independent** — no shared packages, no monorepo tooling, duplication preferred
+- **All API routes must be under `/v1`** — use `app.basePath("/v1")` in Hono, web app calls `/v1/*` with relative URLs (same domain)
