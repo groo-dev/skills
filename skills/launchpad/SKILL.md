@@ -347,6 +347,18 @@ export const config = {
 - Never set default values for env vars in code
 - Every getter validates and throws
 
+### Run dev servers
+
+After all configuration is complete, use groo CLI to start dev servers for all sub-projects:
+
+```bash
+groo dev
+```
+
+This discovers all services with `dev` scripts, presents an interactive selector, and launches selected services in parallel with color-coded output. It auto-detects ports from vite.config and wrangler.jsonc — no extra configuration needed.
+
+Instruct the user to run `groo dev` to verify all services start correctly before moving on.
+
 ## Phase 4 — Project Files
 
 ### .claude/settings.local.json
@@ -421,7 +433,7 @@ Include project structure listing and deployment instructions.
 Generate with:
 - Project name + description
 - Project structure (each sub-project and what it does)
-- Prerequisites: Node.js, wrangler, groo CLI (`npm install -g @groo-dev/cli`)
+- Prerequisites: Node.js, wrangler, groo CLI (`brew install groo-dev/tap/groo`)
 - Setup: clone, install deps per project, copy `.env.example`/`.dev.vars.example`
 - Run locally: `groo dev`
 - Deploy: `npm run deploy` per project
