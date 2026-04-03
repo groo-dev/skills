@@ -1,6 +1,6 @@
 # groo-dev/skills
 
-A collection of Claude Code skills by groo.dev.
+Agent skills for scaffolding and automating development workflows.
 
 ## Available Skills
 
