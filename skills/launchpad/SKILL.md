@@ -59,9 +59,9 @@ Ask if the project needs authentication. Suggest options:
 
 Ask if the project needs email integration. If yes, always use **Resend**.
 
-### 7. Application domain (only if API worker selected)
+### 7. Application domain
 
-Ask for the domain the application will be hosted on. This is needed to configure Cloudflare worker routes so the API worker serves `/v1/*` on the same domain as the web app. If the user doesn't have a domain yet, suggest using a placeholder like `myapp.example.com` — they can update it later in wrangler.jsonc. Skip this question if no API worker was selected in step 3.
+Ask for the preferred domain the application will be hosted on. If the user doesn't have one, suggest `{name}.groo.bot` as a subdomain. This domain is used to configure Cloudflare worker routes (for API workers serving `/v1/*`) and Pages custom domains. If no API worker was selected in step 3, this is still useful for the Pages deployment but not strictly required — let the user skip if they prefer.
 
 ### 8. Resource creation
 
@@ -215,7 +215,7 @@ Where `{api-port}` is the API worker's dev server port from wrangler.jsonc.
 ```json
 {
   "dev": "wrangler dev",
-  "deploy": "wrangler deploy --minify",
+  "deploy": "wrangler deploy --minify --var VERSION:$VERSION",
   "cf-typegen": "wrangler types --env-interface CloudflareBindings"
 }
 ```
@@ -236,9 +236,11 @@ Where `{api-port}` is the API worker's dev server port from wrangler.jsonc.
   "build": "tsc -b && vite build",
   "preview": "vite preview",
   "lint": "eslint .",
-  "deploy": "npm run build && wrangler pages deploy dist --project-name {prefix}-web"
+  "deploy": "VITE_VERSION=$VERSION npm run build && wrangler pages deploy dist --project-name {prefix}-web"
 }
 ```
+
+Note: the `deploy` script uses Unix shell syntax for inline env vars. Windows users should deploy via CI.
 
 ### Generate types
 
@@ -292,10 +294,14 @@ import { Hono } from "hono";
 
 const app = new Hono<{ Bindings: CloudflareBindings }>().basePath("/v1");
 
-app.get("/health", (c) => c.json({ status: "ok" }));
+app.get("/health", (c) =>
+  c.json({ status: "ok", version: c.env.VERSION })
+);
 
 export default app;
 ```
+
+`VERSION` is passed as a `var` at deploy time via `wrangler deploy --var VERSION:$VERSION`. See GitHub Actions section for how this is set from `record-release`.
 
 All API routes must be registered on this app instance — they will automatically be prefixed with `/v1`.
 
@@ -436,23 +442,196 @@ Generate with:
 - Prerequisites: Node.js, wrangler, groo CLI (`brew install groo-dev/tap/groo`)
 - Setup: clone, install deps per project, copy `.env.example`/`.dev.vars.example`
 - Run locally: `groo dev`
-- Deploy: `npm run deploy` per project
+- Deployment: auto-deploys on push to `main` via GitHub Actions; requires `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `OPS_API_TOKEN` secrets in GitHub repo settings
+- Manual deploy: `VERSION=x.x.x npm run deploy` per project (requires `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` env vars)
 - Environment variables table
 
 ### Example files
 
 **`.env.example`** for each web project:
 ```
+VITE_VERSION=dev
 VITE_CLERK_PUBLISHABLE_KEY=pk_test_xxxx
 ```
 
 **`.dev.vars.example`** for each worker:
 ```
+VERSION=dev
 CLERK_SECRET_KEY=sk_test_xxxx
 RESEND_API_KEY=re_xxxx
 ```
 
-List only the vars that are actually needed based on selected integrations.
+`VERSION` / `VITE_VERSION` are always included. Other vars are only listed if the corresponding integration was selected.
+
+### GitHub Actions
+
+Generate a separate workflow file per sub-project under `.github/workflows/`. Name each file `deploy-{project-name}.yml`. This keeps deployments independent — a failed web build won't block an API deploy.
+
+Both templates use `npm run deploy` which expects `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as environment variables. The `VERSION` env var is set from `record-release` output so deploy scripts can inject it.
+
+**Worker workflow** (`.github/workflows/deploy-{worker-name}.yml`):
+
+```yaml
+name: Deploy {worker-name}
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "{worker-dir}/**"
+      - ".github/workflows/deploy-{worker-name}.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record Release
+        id: release
+        uses: groo-dev/record-release@v1
+        with:
+          token: ${{ secrets.OPS_API_TOKEN }}
+          environment: production
+          bump: patch
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "{worker-dir}/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: "{worker-dir}"
+
+      - name: Deploy
+        run: npm run deploy
+        working-directory: "{worker-dir}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VERSION: ${{ steps.release.outputs.version }}
+```
+
+**Web workflow** (`.github/workflows/deploy-{web-name}.yml`):
+
+```yaml
+name: Deploy {web-name}
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "{web-dir}/**"
+      - ".github/workflows/deploy-{web-name}.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record Release
+        id: release
+        uses: groo-dev/record-release@v1
+        with:
+          token: ${{ secrets.OPS_API_TOKEN }}
+          environment: production
+          bump: patch
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "{web-dir}/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: "{web-dir}"
+
+      - name: Deploy
+        run: npm run deploy
+        working-directory: "{web-dir}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VERSION: ${{ steps.release.outputs.version }}
+```
+
+Generate one workflow file per sub-project. Each workflow uses `paths` to only trigger when its own directory changes. Lightweight workers follow the worker template.
+
+**Required GitHub secrets:**
+- `CLOUDFLARE_API_TOKEN` — Cloudflare API token with Workers/Pages permissions
+- `CLOUDFLARE_ACCOUNT_ID` — Cloudflare account ID
+- `OPS_API_TOKEN` — Groo Ops Dashboard token for release tracking
+
+### TODO.md
+
+Generate a `TODO.md` with a checklist at the top and detailed instructions for each item below. Only include items that are relevant to the selected sub-projects and integrations.
+
+```markdown
+# Setup TODO
+
+## Checklist
+
+- [ ] Create Cloudflare API token
+- [ ] Add GitHub secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `OPS_API_TOKEN`)
+- [ ] Configure custom domain in Cloudflare
+- [ ] Add production environment variables
+
+---
+
+## Create Cloudflare API token
+
+You need this before adding GitHub secrets.
+
+1. Go to https://dash.cloudflare.com/profile/api-tokens
+2. Click "Create Token"
+3. Use the "Edit Cloudflare Workers" template
+4. Add `Cloudflare Pages: Edit` permission
+5. Set zone resources to your domain
+6. Create and copy the token — you'll use it in the next step
+
+## Add GitHub secrets
+
+Go to your GitHub repo > Settings > Secrets and variables > Actions > New repository secret. Add:
+
+| Secret | Where to find it |
+|--------|-----------------|
+| `CLOUDFLARE_API_TOKEN` | The token you just created above |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare dashboard > any domain > Overview > right sidebar |
+| `OPS_API_TOKEN` | Groo Ops Dashboard > Project Settings > API Tokens |
+
+## Configure custom domain
+
+1. Go to Cloudflare dashboard > your zone > DNS
+2. Add a CNAME record for `{domain}` pointing to `{prefix}-web.pages.dev` (proxied)
+3. Go to Pages > {prefix}-web > Custom domains > Add `{domain}`
+4. If the project has an API worker, the route (`{domain}/v1/*`) is already configured in wrangler.jsonc and will activate on first deploy
+
+## Add production environment variables
+
+For each worker, add secrets via wrangler CLI:
+
+    wrangler secret put SECRET_NAME --name {prefix}-{worker}
+
+Or add them in Cloudflare dashboard > Workers & Pages > your worker > Settings > Variables.
+```
+
+Adjust the checklist and detail sections based on the actual integrations selected (e.g. add Clerk/Resend key setup if those were chosen).
 
 ### .gitignore
 
